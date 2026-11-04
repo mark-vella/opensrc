@@ -5,7 +5,8 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 
 use super::error::{Error, Result};
-use super::registries::Registry;
+use super::registries::repo::parse_repo_spec;
+use super::registries::{detect_input_type, detect_registry, Registry};
 
 static RE_HTTPS_REPO: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"https?://([^/]+)/([^/]+)/([^/]+)").unwrap());
@@ -174,59 +175,129 @@ pub fn extract_repo_base_path(full_path: &str) -> String {
     }
 }
 
-pub fn remove_package_source(name: &str, registry: Registry) -> Result<(bool, bool)> {
-    let (packages, _) = list_sources()?;
-    let pkg = match packages
-        .iter()
-        .find(|p| p.name == name && p.registry == registry)
-    {
-        Some(p) => p.clone(),
-        None => return Ok((false, false)),
-    };
-
-    let pkg_repo_base = extract_repo_base_path(&pkg.path);
-
-    let others_use_same = packages.iter().any(|p| {
-        extract_repo_base_path(&p.path) == *pkg_repo_base
-            && !(p.name == name && p.registry == registry)
-    });
-
-    let mut repo_removed = false;
-
-    if !others_use_same {
-        let parts: Vec<&str> = pkg.path.split('/').collect();
-        if parts.len() >= 5 && parts[0] == "repos" {
-            let versioned = parts[..5].join("/");
-            let versioned_path = get_opensrc_dir()?.join(&versioned);
-            if versioned_path.exists() {
-                fs::remove_dir_all(&versioned_path)?;
-                repo_removed = true;
-                cleanup_empty_parent_dirs(&versioned)?;
-            }
-        }
-    }
-
-    Ok((true, repo_removed))
+pub enum CachedSource {
+    Package(PackageEntry),
+    Repo(RepoEntry),
 }
 
-pub fn remove_repo_source(display_name: &str, version: Option<&str>) -> Result<bool> {
-    if let Some(ver) = version {
-        let path = get_repo_path(display_name, ver)?;
-        if !path.exists() {
-            return Ok(false);
-        }
-        fs::remove_dir_all(&path)?;
-        cleanup_empty_parent_dirs(&get_repo_relative_path(display_name, ver))?;
-        Ok(true)
-    } else {
-        let repo_dir = get_repos_dir()?.join(display_name);
-        if !repo_dir.exists() {
-            return Ok(false);
-        }
-        fs::remove_dir_all(&repo_dir)?;
-        cleanup_empty_parent_dirs(&format!("{REPOS_DIR}/{display_name}"))?;
-        Ok(true)
+/// Resolves a `fetch`-style spec to its sources.json entry. A package spec is looked up in its
+/// detected registry first, then in the others. Fails with `InvalidRepoSpec` or `SourceNotFound`.
+pub fn find_cached_source(input: &str) -> Result<CachedSource> {
+    let (packages, repos) = list_sources()?;
+
+    if detect_input_type(input) == "repo" {
+        let spec =
+            parse_repo_spec(input).ok_or_else(|| Error::InvalidRepoSpec(input.to_string()))?;
+        let name = format!("{}/{}/{}", spec.host, spec.owner, spec.repo);
+        return repos
+            .into_iter()
+            .find(|r| r.name == name)
+            .map(CachedSource::Repo)
+            .ok_or_else(|| Error::SourceNotFound(input.to_string()));
     }
+
+    let detected = detect_registry(input);
+    let name = detected.clean_spec;
+    let fallbacks = [Registry::Npm, Registry::PyPI, Registry::Crates]
+        .into_iter()
+        .filter(|r| *r != detected.registry);
+    std::iter::once(detected.registry)
+        .chain(fallbacks)
+        .find_map(|registry| {
+            packages
+                .iter()
+                .find(|p| p.name == name && p.registry == registry)
+                .cloned()
+        })
+        .map(CachedSource::Package)
+        .ok_or(Error::SourceNotFound(name))
+}
+
+/// Drops `source` from the index, then deletes the folders it leaves unreferenced. Removing a
+/// repo also deletes unindexed folders under its `repos/<host>/<owner>/<repo>` directory.
+/// Returns whether the source's own version folder was deleted.
+pub fn remove_cached_source(source: &CachedSource) -> Result<bool> {
+    let (mut packages, mut repos) = list_sources()?;
+
+    let (own_path, mut candidates) = match source {
+        CachedSource::Package(pkg) => {
+            packages.retain(|p| !(p.name == pkg.name && p.registry == pkg.registry));
+            (pkg.path.clone(), Vec::new())
+        }
+        CachedSource::Repo(repo) => {
+            repos.retain(|r| r.name != repo.name);
+            (repo.path.clone(), repo_version_folders(&repo.name)?)
+        }
+    };
+    candidates.push(own_path.clone());
+
+    let deleted = write_sources_and_prune(packages, repos, &candidates)?;
+    Ok(version_folder(&own_path).is_some_and(|own| deleted.contains(&own)))
+}
+
+/// Writes the index, then deletes each candidate's version folder
+/// (`repos/<host>/<owner>/<repo>/<version>`) that no written entry references, then prunes the
+/// empty parents. Writing first means an interruption leaves an orphan folder, never an entry
+/// whose folder is gone. Returns the deleted folders, relative to the opensrc directory.
+pub fn write_sources_and_prune(
+    packages: Vec<PackageEntry>,
+    repos: Vec<RepoEntry>,
+    candidates: &[String],
+) -> Result<Vec<String>> {
+    let referenced: Vec<String> = packages
+        .iter()
+        .map(|p| p.path.as_str())
+        .chain(repos.iter().map(|r| r.path.as_str()))
+        .filter_map(version_folder)
+        .collect();
+
+    write_sources(packages, repos)?;
+
+    let mut unreferenced: Vec<String> = candidates
+        .iter()
+        .filter_map(|c| version_folder(c))
+        .filter(|folder| !referenced.contains(folder))
+        .collect();
+    unreferenced.sort();
+    unreferenced.dedup();
+
+    let base = get_opensrc_dir()?;
+    let mut deleted = Vec::new();
+    for folder in unreferenced {
+        let full = base.join(&folder);
+        if full.exists() {
+            fs::remove_dir_all(&full)?;
+            deleted.push(folder.clone());
+        }
+        cleanup_empty_parent_dirs(&folder)?;
+    }
+    Ok(deleted)
+}
+
+fn version_folder(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').take(5).collect();
+    let well_formed = parts.len() == 5
+        && parts[0] == REPOS_DIR
+        && parts.iter().all(|p| !matches!(*p, "" | "." | ".."));
+    well_formed.then(|| parts.join("/"))
+}
+
+fn repo_version_folders(display_name: &str) -> Result<Vec<String>> {
+    let dir = get_repos_dir()?.join(display_name);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut folders = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            folders.push(format!(
+                "{REPOS_DIR}/{display_name}/{}",
+                entry.file_name().to_string_lossy()
+            ));
+        }
+    }
+    Ok(folders)
 }
 
 fn cleanup_empty_parent_dirs(relative_path: &str) -> Result<()> {
