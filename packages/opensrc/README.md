@@ -67,7 +67,7 @@ opensrc update zod vercel/next.js
 opensrc update --npm           # only npm packages (same filters as clean)
 ```
 
-Packages are re-resolved like `fetch` (lockfile version, else latest) and the old version folder is removed. Repos are re-cloned at their cached ref, so a branch picks up new commits and a missing ref keeps the old copy.
+Packages are re-resolved like `fetch` (lockfile version, else latest) and the old version folder is removed once nothing else uses it. Repos are re-cloned at their cached ref, so a branch picks up new commits and a missing ref keeps the old copy.
 
 ### Remove cached sources
 
