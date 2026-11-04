@@ -256,7 +256,7 @@ pub fn write_sources_and_prune(
     let mut unreferenced: Vec<String> = candidates
         .iter()
         .filter_map(|c| version_folder(c))
-        .filter(|folder| !referenced.contains(folder))
+        .filter(|folder| !referenced.iter().any(|r| r.eq_ignore_ascii_case(folder)))
         .collect();
     unreferenced.sort();
     unreferenced.dedup();

@@ -181,3 +181,60 @@ fn removes_several_targets_and_counts_missing_ones() {
     assert!(!home.exists("repos/github.com/colinhacks"));
     assert!(home.exists("repos/github.com/other/lib/1.0.0/MARKER"));
 }
+
+#[test]
+fn repo_entry_keeps_shared_version_folder_until_repo_is_removed() {
+    let home = TestHome::new();
+    let zod_repo = repo(
+        "github.com/colinhacks/zod",
+        "3.22.0",
+        "repos/github.com/colinhacks/zod/3.22.0",
+    );
+    home.seed_index(json!({
+        "packages": [package("zod", "npm", "3.22.0", "repos/github.com/colinhacks/zod/3.22.0")],
+        "repos": [zod_repo.clone()],
+    }));
+    home.seed_folder("repos/github.com/colinhacks/zod/3.22.0");
+
+    let first = home.run(&["remove", "zod"]);
+
+    assert_eq!(first.code, Some(0), "{first:?}");
+    assert_eq!(home.index(), Some(json!({ "repos": [zod_repo] })));
+    assert!(home.exists("repos/github.com/colinhacks/zod/3.22.0/MARKER"));
+
+    let second = home.run(&["remove", "colinhacks/zod"]);
+
+    assert_eq!(second.code, Some(0), "{second:?}");
+    assert_eq!(home.index(), None);
+    assert!(!home.exists("repos/github.com/colinhacks"));
+}
+
+#[test]
+fn removing_repo_keeps_folder_that_differs_from_a_package_path_only_in_case() {
+    let home = TestHome::new();
+    let typescript = package(
+        "typescript",
+        "npm",
+        "5.4.5",
+        "repos/github.com/microsoft/TypeScript/5.4.5",
+    );
+    home.seed_index(json!({
+        "packages": [typescript.clone()],
+        "repos": [repo(
+            "github.com/microsoft/typescript",
+            "main",
+            "repos/github.com/microsoft/typescript/main",
+        )],
+    }));
+    home.seed_folder("repos/github.com/microsoft/TypeScript/5.4.5");
+    home.seed_folder("repos/github.com/microsoft/typescript/5.4.5");
+    home.seed_folder("repos/github.com/microsoft/typescript/main");
+
+    let run = home.run(&["remove", "microsoft/typescript"]);
+
+    assert_eq!(run.code, Some(0), "{run:?}");
+    assert_eq!(home.index(), Some(json!({ "packages": [typescript] })));
+    assert!(home.exists("repos/github.com/microsoft/TypeScript/5.4.5/MARKER"));
+    assert!(home.exists("repos/github.com/microsoft/typescript/5.4.5/MARKER"));
+    assert!(!home.exists("repos/github.com/microsoft/typescript/main"));
+}
