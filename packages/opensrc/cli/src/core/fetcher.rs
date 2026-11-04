@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use crate::core::cache::{
     get_absolute_path, get_package_info, get_repo_info, list_sources, now_iso, write_sources,
-    PackageEntry, RepoEntry,
+    write_sources_and_prune, CachedSource, PackageEntry, RepoEntry,
 };
 use crate::core::error::{Error, Result};
-use crate::core::git::{fetch_repo_source, fetch_source};
-use crate::core::registries::repo::{parse_repo_spec, resolve_repo};
+use crate::core::git::{fetch_repo_source, fetch_source, refresh_repo_source};
+use crate::core::registries::repo::{parse_repo_spec, resolve_repo, ResolvedRepo};
 use crate::core::registries::{
     detect_input_type, parse_package_spec, resolve_package, PackageSpec, Registry,
 };
@@ -194,5 +194,54 @@ pub fn ensure_cached(spec: &str, cwd: &str, verbose: bool) -> Result<FetchOutcom
         ensure_repo_cached(spec, verbose)
     } else {
         ensure_package_cached(spec, cwd, verbose)
+    }
+}
+
+pub enum UpdateOutcome {
+    Package { from: String, to: String },
+    Repo { git_ref: String },
+}
+
+/// Refreshes a cached source. A package is re-resolved like `fetch <name>` (lockfile in `cwd`,
+/// else latest) and its old version folder is pruned once nothing references it. A repo is
+/// re-cloned at its stored ref; on failure its old copy and entry are left untouched.
+pub fn update_cached_source(
+    source: &CachedSource,
+    cwd: &str,
+    verbose: bool,
+) -> Result<UpdateOutcome> {
+    match source {
+        CachedSource::Package(old) => {
+            let outcome = ensure_cached(&format!("{}:{}", old.registry, old.name), cwd, verbose)?;
+            if outcome.version != old.version {
+                let (packages, repos) = list_sources()?;
+                write_sources_and_prune(packages, repos, std::slice::from_ref(&old.path))?;
+            }
+            Ok(UpdateOutcome::Package {
+                from: old.version.clone(),
+                to: outcome.version,
+            })
+        }
+        CachedSource::Repo(old) => {
+            log(
+                verbose,
+                &format!("Updating {}@{}...", old.name, old.version),
+            );
+            let resolved = ResolvedRepo {
+                git_ref: old.version.clone(),
+                repo_url: format!("https://{}", old.name),
+                display_name: old.name.clone(),
+            };
+            refresh_repo_source(&resolved, &old.path)?;
+
+            let (packages, mut repos) = list_sources()?;
+            if let Some(entry) = repos.iter_mut().find(|r| r.name == old.name) {
+                entry.fetched_at = now_iso();
+            }
+            write_sources(packages, repos)?;
+            Ok(UpdateOutcome::Repo {
+                git_ref: old.version.clone(),
+            })
+        }
     }
 }

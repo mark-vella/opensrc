@@ -2,7 +2,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::cache::{get_repo_display_name, get_repo_path, get_repo_relative_path};
+use super::cache::{
+    get_absolute_path, get_opensrc_dir, get_repo_display_name, get_repo_path,
+    get_repo_relative_path,
+};
 use super::error::{Error, Result};
 use super::registries::repo::ResolvedRepo;
 use super::registries::{authenticated_clone_url, Registry, ResolvedPackage};
@@ -254,4 +257,59 @@ pub fn fetch_repo_source(resolved: &ResolvedRepo) -> Result<FetchResult> {
         error: clone.error,
         registry: None,
     })
+}
+
+/// Re-clones `resolved` at its exact ref and swaps it into the folder at `relative_path`. The old
+/// copy stays in place when the ref is missing or the clone fails, and is restored if the swap
+/// fails.
+pub fn refresh_repo_source(resolved: &ResolvedRepo, relative_path: &str) -> Result<()> {
+    let staging_root = get_opensrc_dir()?.join(".staging");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let staging = staging_root.join(format!("{}-{nanos}", std::process::id()));
+    fs::create_dir_all(&staging_root)?;
+    fs::create_dir(&staging)?;
+
+    let result = clone_and_swap(resolved, &staging, &get_absolute_path(relative_path)?);
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_dir(&staging_root);
+    result
+}
+
+fn clone_and_swap(resolved: &ResolvedRepo, staging: &Path, target: &Path) -> Result<()> {
+    let fresh = staging.join("new");
+    let clone_url = authenticated_clone_url(&resolved.repo_url);
+    let clone = clone_at_ref(&clone_url, &fresh, &resolved.git_ref);
+    match (clone.success, clone.error) {
+        (true, None) => {}
+        (false, error) => {
+            return Err(Error::CloneFailed(
+                error.unwrap_or_else(|| "Failed to clone repository".to_string()),
+            ))
+        }
+        (true, Some(_)) => {
+            return Err(Error::CloneFailed(format!(
+                "ref \"{}\" no longer exists",
+                resolved.git_ref
+            )))
+        }
+    }
+    remove_git_dir(&fresh);
+
+    let old = staging.join("old");
+    let had_old = target.exists();
+    if had_old {
+        fs::rename(target, &old)?;
+    } else if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Err(e) = fs::rename(&fresh, target) {
+        if had_old {
+            fs::rename(&old, target)?;
+        }
+        return Err(e.into());
+    }
+    Ok(())
 }

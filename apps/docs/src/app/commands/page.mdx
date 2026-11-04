@@ -56,6 +56,31 @@ opensrc list
 opensrc list --json
 ```
 
+## update
+
+Re-fetch cached sources. With no arguments, every cached package and repository is updated:
+
+```bash
+opensrc update
+opensrc update zod pypi:requests vercel/ai
+opensrc update --repos
+opensrc update zod --cwd ./my-app
+```
+
+Packages are re-resolved the same way as `fetch` (lockfile version, else latest), and the previous version folder is removed when nothing else uses it. Repositories are re-cloned at their cached ref, so a branch picks up new commits. If the ref no longer exists, the old copy is kept and the command exits with an error.
+
+| Flag | Description |
+|------|-------------|
+| `--packages` | Only update packages (not repos) |
+| `--repos` | Only update repositories |
+| `--npm` | Only update npm packages |
+| `--pypi` | Only update PyPI packages |
+| `--crates` | Only update crates.io packages |
+| `--cwd <path>` | Working directory for lockfile version resolution |
+| `--quiet` / `-q` | Suppress progress output |
+
+The type filters cannot be combined with named targets.
+
 ## remove
 
 Remove a specific package or repository from the cache:

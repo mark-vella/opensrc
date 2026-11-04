@@ -1,19 +1,18 @@
 use std::fs;
 
+use crate::commands::Scope;
 use crate::core::cache::{
     cleanup_empty_dirs, extract_repo_base_path, get_opensrc_dir, get_repos_dir, list_sources,
     write_sources, PackageEntry, RepoEntry,
 };
 use crate::core::error::{Error, Result};
-use crate::core::registries::Registry;
 
-pub fn run(
-    clean_packages_flag: bool,
-    clean_repos_flag: bool,
-    registry: Option<Registry>,
-) -> Result<()> {
-    let clean_packages = clean_packages_flag || !clean_repos_flag;
-    let clean_repos = clean_repos_flag || (!clean_packages_flag && registry.is_none());
+pub fn run(scope: Scope) -> Result<()> {
+    let Scope {
+        packages: clean_packages,
+        repos: clean_repos,
+        registry,
+    } = scope;
 
     let (packages, repos) = list_sources()?;
 

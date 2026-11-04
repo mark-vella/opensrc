@@ -51,6 +51,33 @@ enum Commands {
         #[arg(required = true)]
         packages: Vec<String>,
     },
+    /// Re-fetch cached packages and repos (all of them when no targets are given)
+    Update {
+        /// Packages or repos to update (e.g., zod, pypi:requests, owner/repo)
+        #[arg(conflicts_with_all = ["packages", "repos", "npm", "pypi", "crates"])]
+        targets: Vec<String>,
+        /// Only update packages (all registries)
+        #[arg(long)]
+        packages: bool,
+        /// Only update repos
+        #[arg(long)]
+        repos: bool,
+        /// Only update npm packages
+        #[arg(long)]
+        npm: bool,
+        /// Only update PyPI packages
+        #[arg(long)]
+        pypi: bool,
+        /// Only update crates.io packages
+        #[arg(long)]
+        crates: bool,
+        /// Working directory for lockfile version resolution
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Suppress progress output
+        #[arg(long, short)]
+        quiet: bool,
+    },
     /// Remove all cached packages and/or repos
     Clean {
         /// Only remove packages (all registries)
@@ -91,25 +118,31 @@ fn main() {
 
         Some(Commands::Remove { packages }) => commands::remove::run(&packages),
 
+        Some(Commands::Update {
+            targets,
+            packages,
+            repos,
+            npm,
+            pypi,
+            crates,
+            cwd,
+            quiet,
+        }) => commands::update::run(
+            &targets,
+            commands::Scope::from_flags(packages, repos, npm, pypi, crates),
+            cwd.as_deref(),
+            quiet,
+        ),
+
         Some(Commands::Clean {
             packages,
             repos,
             npm,
             pypi,
             crates,
-        }) => {
-            let registry = if npm {
-                Some(core::registries::Registry::Npm)
-            } else if pypi {
-                Some(core::registries::Registry::PyPI)
-            } else if crates {
-                Some(core::registries::Registry::Crates)
-            } else {
-                None
-            };
-
-            commands::clean::run(packages || registry.is_some(), repos, registry)
-        }
+        }) => commands::clean::run(commands::Scope::from_flags(
+            packages, repos, npm, pypi, crates,
+        )),
 
         None => {
             Cli::parse_from(["opensrc", "--help"]);
