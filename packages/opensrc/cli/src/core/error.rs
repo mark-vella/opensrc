@@ -26,6 +26,9 @@ pub enum Error {
     #[error("{0}")]
     CloneFailed(String),
 
+    #[error("{0} not found")]
+    SourceNotFound(String),
+
     #[error("Could not determine home directory. Set the OPENSRC_HOME environment variable.")]
     HomeDirNotFound,
 
